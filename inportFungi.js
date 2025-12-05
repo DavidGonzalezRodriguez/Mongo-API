@@ -1,116 +1,129 @@
-// importFungi.js
-import fetch from "node-fetch";
-import { MongoClient } from "mongodb";
+const fetch = require("node-fetch");
+const { MongoClient } = require("mongodb");
 
-const MONGO_URI = process.env.MONGO_URI;
-if (!MONGO_URI) {
-    console.error("❌ ERROR: No has definido MONGO_URI");
-    process.exit(1);
-}
+// 🔥 TU URI DE ATLAS
+const MONGO_URI = "mongodb+srv://David:Alejandria123@cluster0.mumjhqv.mongodb.net/?retryWrites=true&w=majority";
+const DB_NAME = "Proyecto";
+const COLLECTION = "hongos";
 
-const client = new MongoClient(MONGO_URI);
-const dbName = "Proyecto";
-const collectionName = "hongos";
+const PAGE_SIZE = 500;
 
-// ============================================
-// 🔥 FUNCIÓN QUE HACE FETCH CON REINTENTOS
-// ============================================
-async function safeFetch(url, retries = 5) {
-    for (let i = 0; i < retries; i++) {
+// 🔥 URL CORRECTA (SIN SALTOS, SIN ESPACIOS, SIN LIMIT=0)
+const BASE = "https://api.gbif.org/v1/species/search?kingdomKey=5&rank=SPECIES";
+
+// ---------------------------------------------
+// FETCH con reintentos
+// ---------------------------------------------
+async function safeFetch(url) {
+    for (let i = 1; i <= 5; i++) {
         try {
             const res = await fetch(url);
             if (!res.ok) throw new Error("HTTP " + res.status);
             return await res.json();
-        } catch (err) {
-            console.log(`⚠️ Error fetch (Intento ${i + 1}/${retries}): ${err}`);
-            await new Promise(r => setTimeout(r, 1500)); // esperar 1.5s
+        } catch (e) {
+            console.log(`⚠️ Error fetch (${i}/5):`, e.message);
+            await new Promise(r => setTimeout(r, 500 * i));
         }
     }
-    throw new Error("❌ ERROR FATAL: fetch falló tras varios intentos");
+    throw new Error("❌ fetch falló tras 5 intentos");
 }
 
-// ============================================
-// 🔥 OBTENER NOMBRE COMÚN EN ESPAÑOL
-// ============================================
-async function obtenerNombreComun(key) {
+// ---------------------------------------------
+// NOMBRE COMÚN EN ESPAÑOL
+// ---------------------------------------------
+async function getVernacularName(key) {
     const url = `https://api.gbif.org/v1/species/${key}/vernacularNames`;
 
     try {
         const data = await safeFetch(url);
+        if (!data.results) return null;
 
-        for (const n of data.results) {
-            const lang = (n.language || "").toLowerCase();
-            if (
-                lang === "es" ||
-                lang === "spa" ||
-                lang.includes("span") ||
-                lang.includes("espa")
-            ) {
-                return n.vernacularName;
+        for (const v of data.results) {
+            const lang = (v.language || "").toLowerCase();
+            if (lang.startsWith("es") || lang.includes("span")) {
+                return v.vernacularName || null;
             }
         }
-    } catch {
-        return null;
-    }
+    } catch (_) { }
 
     return null;
 }
 
-// ============================================
-// 🔥 DESCARGAR TODAS LAS ESPECIES DE FUNGIS
-// ============================================
+// ---------------------------------------------
+// PROCESO PRINCIPAL
+// ---------------------------------------------
 async function run() {
-    console.log("🚀 Iniciando importación de hongos desde GBIF...");
 
+    console.log("🔵 Conectando a Mongo...");
+    const client = new MongoClient(MONGO_URI);
     await client.connect();
-    const db = client.db(dbName);
-    const col = db.collection(collectionName);
+
+    const db = client.db(DB_NAME);
+    const col = db.collection(COLLECTION);
+
+    console.log("🧽 Limpiando colección...");
+    await col.deleteMany({});
+
+    // Obtener TOTAL correcto
+    console.log("📥 Obteniendo count total...");
+    const meta = await safeFetch(`${BASE}&limit=0`);
+    const total = meta.count || 0;
+
+    console.log(`📌 Total especies fungi (GBIF): ${total}`);
 
     let offset = 0;
-    const limit = 300; // bajar carga
     let totalInsertados = 0;
 
-    while (true) {
-        const url = `https://api.gbif.org/v1/species/search?kingdomKey=5&rank=SPECIES&limit=${limit}&offset=${offset}`;
+    while (offset < total) {
 
-        console.log(`📥 Descargando página offset=${offset} ...`);
+        console.log(`📥 Descargando bloque offset=${offset}...`);
 
-        const data = await safeFetch(url);
-
-        if (!data.results || data.results.length === 0) {
-            console.log("🏁 No hay más resultados. Fin.");
-            break;
+        let data;
+        try {
+            data = await safeFetch(`${BASE}&limit=${PAGE_SIZE}&offset=${offset}`);
+        } catch (e) {
+            console.log("⏭️ Saltando por error...");
+            offset += PAGE_SIZE;
+            continue;
         }
 
-        const lote = [];
+        const batch = [];
 
         for (const sp of data.results) {
-            const scientificName = sp.scientificName;
-            const key = sp.key;
 
-            // nombre común
-            const nombreComun = await obtenerNombreComun(key);
+            // Garantizar que realmente sean fungi species
+            if (sp.kingdomKey !== 5) continue;
+            if (sp.rank !== "SPECIES") continue;
 
-            lote.push({
-                key: key,
-                nombreCientifico: scientificName,
-                nombreComun: nombreComun || null
+            const common = await getVernacularName(sp.key);
+
+            batch.push({
+                key: sp.key,
+                scientificName: sp.scientificName || null,
+                canonicalName: sp.canonicalName || null,
+                vernacularName: common || null,
+
+                phylum: sp.phylum || null,
+                class: sp.class || null,
+                order: sp.order || null,
+                family: sp.family || null,
+                genus: sp.genus || null,
+
+                updated: new Date()
             });
         }
 
-        if (lote.length > 0) {
-            await col.insertMany(lote);
-            totalInsertados += lote.length;
-            console.log(`✅ Insertados ${lote.length} (Total: ${totalInsertados})`);
+        if (batch.length > 0) {
+            await col.insertMany(batch);
+            console.log(`   ✔ Guardadas ${batch.length}`);
         }
 
-        offset += limit;
-        await new Promise(r => setTimeout(r, 1000)); // pausa anti-baneo
-
-        if (offset > 200000) break; // seguridad
+        totalInsertados += batch.length;
+        offset += PAGE_SIZE;
     }
 
-    console.log(`🎉 FINALIZADO. Total insertados: ${totalInsertados}`);
+    console.log("🎉 COMPLETADO — Total final insertado:", totalInsertados);
+
     await client.close();
 }
 
