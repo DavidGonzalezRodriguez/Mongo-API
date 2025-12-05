@@ -25,9 +25,14 @@ async function conectarBD() {
     }
 }
 
-conectarBD();
+// Iniciar SOLO DESPUÉS de conectar a Mongo
+conectarBD().then(() => {
+    app.listen(port, "0.0.0.0", () =>
+        console.log(`Servidor escuchando en http://0.0.0.0:${port}`)
+    );
+});
 
-// (el resto de tu código sigue igual...)
+
 
 
 const collectionCuaderno = "cuaderno";
@@ -140,7 +145,4 @@ app.delete("/cuaderno/:id", async (req, res) => {
     }
 });
 
-// SERVIDOR LISTO
-app.listen(port, "0.0.0.0", () =>
-    console.log(`Servidor escuchando en http://0.0.0.0:${port}`)
-);
+
