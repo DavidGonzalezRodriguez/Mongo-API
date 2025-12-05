@@ -24,6 +24,17 @@ async function conectarBD() {
         console.error("❌ Error conectando a MongoDB:", err);
     }
 }
+function normalizar(str) {
+    if (!str) return "";
+    return str
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")   // eliminar acentos
+        .replace(/[^a-z0-9 ]/g, " ")       // quitar símbolos
+        .replace(/\s+/g, " ")              // espacios múltiples
+        .trim();
+}
+
 
 // Iniciar SOLO DESPUÉS de conectar a Mongo
 conectarBD().then(() => {
@@ -75,37 +86,40 @@ app.post("/fungi", async (req, res) => {
     }
 });
 // ---------------- FUNGIS: BÚSQUEDA PARCIAL ----------------
+// ---------------- FUNGIS: BÚSQUEDA PARCIAL REAL ----------------
 app.get("/fungi/search", async (req, res) => {
     try {
-        const texto = (req.query.texto || "").trim();
+        const textoRaw = req.query.texto || "";
+        const texto = normalizar(textoRaw);
 
         if (!texto) return res.json([]);
 
         const fungi = db.collection(collectionFungi);
 
+        // 🔥 Buscar usando los campos NORMALIZADOS
         const filtro = {
             $or: [
-                { scientificName: { $regex: texto, $options: "i" } },
-                { vernacularName: { $regex: texto, $options: "i" } }
+                { scientificNameNorm: { $regex: texto, $options: "i" } },
+                { vernacularNameNorm: { $regex: texto, $options: "i" } }
             ]
         };
 
         const encontrados = await fungi.find(filtro).limit(100).toArray();
 
-        // 🔥 Adaptación para Android
         const salida = encontrados.map(h => ({
             nombreCientifico: h.scientificName,
             nombreComun: h.vernacularName,
-            key: h.key || null
+            key: h._id
         }));
 
         res.json(salida);
 
     } catch (err) {
-        console.error(err);
+        console.error("❌ Error en /fungi/search:", err);
         res.status(500).json([]);
     }
 });
+
 
 
 

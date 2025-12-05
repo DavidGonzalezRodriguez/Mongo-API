@@ -10,6 +10,7 @@ const COLLECTION = "hongos";
 const TAXON_FILE = "./backbone/taxon.tsv";
 const VERNACULAR_FILE = "./backbone/vernacularname.tsv";
 
+// Limitador de concurrencia
 function createLimiter(max) {
     let active = 0;
     const queue = [];
@@ -26,68 +27,10 @@ function createLimiter(max) {
     return run;
 }
 
-// =======================
-// 🔥 NORMALIZADOR GLOBAL
-// =======================
-function normalizar(str) {
-    if (!str) return "";
-    return str
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")   // quitar acentos
-        .replace(/[^a-z0-9 ]/g, " ")       // quitar símbolos
-        .replace(/\s+/g, " ")              // espacios dobles
-        .trim();
-}
-
-// Variantes españolas
-const spanishVariants = new Set([
-    "es", "spa", "spanish",
-    "es-es", "es-mx", "es-ar", "es-cl",
-    "es-co", "es-pe", "es-ec", "es-uy",
-    "español", "castellano"
-]);
-
-// FILTROS TAXONÓMICOS REALES DE HONGOS
-const phylaValidos = new Set([
-    "Basidiomycota",
-    "Ascomycota"
-]);
-
-const clasesValidas = new Set([
-    "Agaricomycetes",
-    "Leotiomycetes",
-    "Sordariomycetes",
-    "Dothideomycetes",
-    "Eurotiomycetes",
-    "Pezizomycetes"
-]);
-
-const ordenesValidos = new Set([
-    "Agaricales",
-    "Boletales",
-    "Russulales",
-    "Polyporales",
-    "Cantharellales",
-    "Pezizales",
-    "Helotiales",
-    "Hypocreales",
-    "Eurotiales"
-]);
-
-const ranksValidos = new Set([
-    "species",
-    "subspecies",
-    "variety",
-    "form",
-    "forma",
-    "infraspecificname",
-    "infraspecific epithet"
-]);
-
-// ----------- 1) Obtener taxonIDs válidos de hongos ----------
+// 1️⃣ PASO — identificar taxonID de especies reales de hongos
 async function obtenerTaxonIdsHongo() {
     const set = new Set();
+
     const rl = readline.createInterface({
         input: fs.createReadStream(TAXON_FILE),
         crlfDelay: Infinity
@@ -105,39 +48,56 @@ async function obtenerTaxonIdsHongo() {
         }
 
         const obj = {};
-        for (let i = 0; i < header.length; i++) obj[header[i]] = cols[i] || "";
+        for (let i = 0; i < header.length; i++) {
+            obj[header[i]] = cols[i] || "";
+        }
 
-        // Filtros reales de hongos
         if (obj.kingdom !== "Fungi") continue;
-        if (!phylaValidos.has(obj.phylum)) continue;
-        if (!clasesValidas.has(obj.class)) continue;
-        if (!ordenesValidos.has(obj.order)) continue;
-        if (!ranksValidos.has((obj.taxonRank || "").toLowerCase())) continue;
+
+        // Allowed ranks
+        const allowed = new Set([
+            "species",
+            "subspecies",
+            "variety",
+            "form",
+            "forma",
+            "infraspecificname",
+            "infraspecific epithet"
+        ]);
+
+        if (!allowed.has(obj.taxonRank.toLowerCase())) continue;
 
         if (!obj.genericName || !obj.specificEpithet) continue;
 
-        const sc = obj.scientificName || "";
-        if (sc.startsWith("SH") || sc.startsWith("OTU")) continue;
+        if (obj.scientificName.startsWith("SH")) continue;
+        if (obj.scientificName.startsWith("OTU")) continue;
 
-        const lower = sc.toLowerCase();
-        if (lower.includes("environmental") || lower.includes("uncultured")) continue;
+        if (obj.scientificName.toLowerCase().includes("environmental")) continue;
+        if (obj.scientificName.toLowerCase().includes("uncultured")) continue;
 
+        // 🔥 AQUÍ ESTABA EL PROBLEMA: ESTA LÍNEA FALTABA
         set.add(obj.taxonID);
     }
 
     return set;
 }
 
-// ----------- 2) Cargar nombres comunes ES ----------
+// 2️⃣ PASO — nombres comunes ES solo para esos taxonID
 async function cargarNombresComunesFiltrados(hongoIDs) {
     const map = new Map();
-
     const rl = readline.createInterface({
         input: fs.createReadStream(VERNACULAR_FILE),
         crlfDelay: Infinity
     });
 
     let header = [];
+
+    const spanishVariants = new Set([
+        "es", "spa", "spanish",
+        "es-es", "es-mx", "es-ar", "es-cl", "es-co",
+        "es-pe", "es-ec", "es-uy",
+        "español", "castellano"
+    ]);
 
     for await (const line of rl) {
         if (!line.trim()) continue;
@@ -149,19 +109,23 @@ async function cargarNombresComunesFiltrados(hongoIDs) {
         }
 
         const obj = {};
-        for (let i = 0; i < header.length; i++) obj[header[i]] = cols[i] || "";
+        for (let i = 0; i < header.length; i++) {
+            obj[header[i]] = cols[i] || "";
+        }
 
         const lang = (obj.language || "").toLowerCase();
 
         if (spanishVariants.has(lang) && hongoIDs.has(obj.taxonID)) {
-            if (!map.has(obj.taxonID)) map.set(obj.taxonID, obj.vernacularName);
+            if (!map.has(obj.taxonID))
+                map.set(obj.taxonID, obj.vernacularName);
         }
     }
 
     return map;
 }
 
-// ----------- 3) Importar en Mongo ----------
+
+// 3️⃣ PASO — Importar especies válidas
 async function importarTaxones(mapVernacular, col) {
     const rl = readline.createInterface({
         input: fs.createReadStream(TAXON_FILE),
@@ -183,32 +147,32 @@ async function importarTaxones(mapVernacular, col) {
         }
 
         const obj = {};
-        for (let i = 0; i < header.length; i++) obj[header[i]] = cols[i] || "";
+        for (let i = 0; i < header.length; i++) {
+            obj[header[i]] = cols[i] || "";
+        }
 
-        // Filtros EXACTOS
         if (obj.kingdom !== "Fungi") continue;
-        if (!phylaValidos.has(obj.phylum)) continue;
-        if (!clasesValidas.has(obj.class)) continue;
-        if (!ordenesValidos.has(obj.order)) continue;
-        if (!ranksValidos.has((obj.taxonRank || "").toLowerCase())) continue;
+
+        // same filters again
+        const allowed = new Set([
+            "species",
+            "subspecies",
+            "variety",
+            "form",
+            "forma",
+            "infraspecificname",
+            "infraspecific epithet"
+        ]);
+
+        if (!allowed.has(obj.taxonRank.toLowerCase())) continue;
         if (!obj.genericName || !obj.specificEpithet) continue;
-
-        const sc = obj.scientificName || "";
-        if (sc.startsWith("SH") || sc.startsWith("OTU")) continue;
-
-        const lower = sc.toLowerCase();
-        if (lower.includes("environmental") || lower.includes("uncultured")) continue;
-
-        const vern = mapVernacular.get(obj.taxonID) || null;
+        if (obj.scientificName.startsWith("SH")) continue;
+        if (obj.scientificName.startsWith("OTU")) continue;
 
         batch.push({
             _id: obj.taxonID,
             scientificName: obj.scientificName,
-            vernacularName: vern,
-
-            // 🔥 CAMPOS NORMALIZADOS PARA BÚSQUEDA PARCIAL
-            scientificNameNorm: normalizar(obj.scientificName),
-            vernacularNameNorm: normalizar(vern || "")
+            vernacularName: mapVernacular.get(obj.taxonID) || null
         });
 
         if (batch.length >= 2000) {
@@ -216,8 +180,11 @@ async function importarTaxones(mapVernacular, col) {
             batch = [];
 
             insertLimiter(async () => {
-                try { await col.insertMany(chunk, { ordered: false }); }
-                catch (e) { if (e.code !== 11000) throw e; }
+                try {
+                    await col.insertMany(chunk, { ordered: false });
+                } catch (e) {
+                    if (e.code !== 11000) throw e;
+                }
             });
 
             total += chunk.length;
@@ -232,27 +199,26 @@ async function importarTaxones(mapVernacular, col) {
     return total;
 }
 
-// ----------- MAIN ----------
+// MAIN
 async function run() {
     console.log("🔵 Conectando a Mongo...");
     const client = new MongoClient(MONGO_URI);
     await client.connect();
     const col = client.db(DB_NAME).collection(COLLECTION);
-
     await col.deleteMany({});
 
-    console.log("📌 1) Filtrando hongos reales...");
+    console.log("📌 1) Filtrando especies reales de hongos...");
     const hongoIDs = await obtenerTaxonIdsHongo();
-    console.log("✔ Hongos válidos:", hongoIDs.size);
+    console.log("✔ Especies válidas:", hongoIDs.size);
 
     console.log("📌 2) Cargando nombres comunes ES...");
     const mapVernacular = await cargarNombresComunesFiltrados(hongoIDs);
-    console.log("✔ Nombres comunes ES:", mapVernacular.size);
+    console.log("✔ Nombres ES cargados:", mapVernacular.size);
 
-    console.log("📌 3) Importando en Mongo...");
+    console.log("📌 3) Importando especies...");
     const total = await importarTaxones(mapVernacular, col);
 
-    console.log("🎉 FIN | Especies importadas:", total);
+    console.log("🎉 FIN — Especies reales importadas:", total);
 
     await client.close();
 }
