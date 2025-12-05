@@ -9,8 +9,8 @@ const port = 3000;
 app.use(cors());
 app.use(bodyParser.json());
 
-// MongoDB
-const uri = "mongodb+srv://user:P4ssw0rd@cluster0.thd625u.mongodb.net/?appName=Cluster0";
+// MongoDB - Usar variable de entorno en Render
+const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri);
 let db;
 
@@ -18,7 +18,7 @@ let db;
 async function conectarBD() {
     try {
         await client.connect();
-        db = client.db("Proyecto");
+        db = client.db("Proyecto"); // <<-- Nombre de TU base
         console.log("🔵 Conectado a MongoDB");
     } catch (err) {
         console.error("❌ Error conectando a MongoDB:", err);
@@ -26,6 +26,9 @@ async function conectarBD() {
 }
 
 conectarBD();
+
+// (el resto de tu código sigue igual...)
+
 
 const collectionCuaderno = "cuaderno";
 const collectionUsuarios = "usuarios";
