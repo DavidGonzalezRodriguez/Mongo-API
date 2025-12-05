@@ -98,19 +98,35 @@ app.post("/cuaderno", async (req, res) => {
     try {
         const nuevo = req.body;
 
+        // ⚠️ VALIDAR userId
+        if (!nuevo.userId) {
+            return res.json({
+                success: false,
+                message: "Falta userId en el objeto enviado"
+            });
+        }
+
+        // Convertir tipos para Mongo
         if (nuevo.fecha) nuevo.fecha = new Date(nuevo.fecha);
         if (nuevo.latitud) nuevo.latitud = Number(nuevo.latitud);
         if (nuevo.longitud) nuevo.longitud = Number(nuevo.longitud);
 
+        // Insertar en Mongo
         const cuaderno = db.collection(collectionCuaderno);
         const result = await cuaderno.insertOne(nuevo);
 
-        res.json({ success: true, id: result.insertedId });
+        res.json({
+            success: true,
+            id: result.insertedId,
+            message: "Elemento insertado correctamente"
+        });
+
     } catch (err) {
-        console.error(err);
+        console.error("❌ Error insertando:", err);
         res.json({ success: false, message: "Error insertando" });
     }
 });
+
 
 // PUT editar elemento
 app.put("/cuaderno/:id", async (req, res) => {
