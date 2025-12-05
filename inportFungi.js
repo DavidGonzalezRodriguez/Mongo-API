@@ -1,87 +1,117 @@
+// importFungi.js
+import fetch from "node-fetch";
+import { MongoClient } from "mongodb";
 
-const { MongoClient } = require("mongodb");
-
-const uri = process.env.MONGO_URI;
-const client = new MongoClient(uri);
-
-async function run() {
-    try {
-        await client.connect();
-        const db = client.db("Proyecto");
-        const collection = db.collection("fungi");
-
-        console.log("🔵 Conectado a MongoDB");
-
-        let limit = 300;
-        let offset = 0;
-
-        // 👇 SOLO especies aceptadas del reino Fungi
-        let total = 1;
-
-        while (offset < total) {
-
-            const url = `https://api.gbif.org/v1/species/search?kingdomKey=5&rank=SPECIES&status=ACCEPTED&limit=${limit}&offset=${offset}`;
-
-            console.log(`📡 Descargando página offset ${offset}`);
-
-            const resp = await fetch(url);
-            const data = await resp.json();
-
-            if (offset === 0) total = data.count; // número real de aceptadas
-
-            const results = data.results || [];
-            let batch = [];
-
-            for (const item of results) {
-                if (!item.key || !item.scientificName) continue;
-
-                let nombreComun = "";
-
-                if (item.vernacularNames) {
-                    const esp = item.vernacularNames.find(v =>
-                        (v.language || "").toLowerCase().startsWith("es")
-                    );
-                    const eng = item.vernacularNames.find(v =>
-                        (v.language || "").toLowerCase().startsWith("en")
-                    );
-
-                    if (esp) nombreComun = esp.vernacularName;
-                    else if (eng) nombreComun = eng.vernacularName;
-                }
-
-                batch.push({
-                    key: item.key,
-                    nombreCientifico: item.scientificName,
-                    nombreComun
-                });
-            }
-
-            if (batch.length > 0) {
-                const ops = batch.map(doc => ({
-                    updateOne: {
-                        filter: { key: doc.key },
-                        update: { $set: doc },
-                        upsert: true
-                    }
-                }));
-
-                await collection.bulkWrite(ops);
-                console.log(`✔ Guardados/actualizados: ${batch.length}`);
-            }
-
-            offset += limit;
-
-            await new Promise(r => setTimeout(r, 300)); // evitar ban
-        }
-
-        console.log("🎉 IMPORTACIÓN COMPLETA (solo especies aceptadas)");
-
-        process.exit(0);
-
-    } catch (err) {
-        console.error("❌ Error:", err);
-        process.exit(1);
-    }
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+    console.error("❌ ERROR: No has definido MONGO_URI");
+    process.exit(1);
 }
 
-run();
+const client = new MongoClient(MONGO_URI);
+const dbName = "Proyecto";
+const collectionName = "hongos";
+
+// ============================================
+// 🔥 FUNCIÓN QUE HACE FETCH CON REINTENTOS
+// ============================================
+async function safeFetch(url, retries = 5) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return await res.json();
+        } catch (err) {
+            console.log(`⚠️ Error fetch (Intento ${i + 1}/${retries}): ${err}`);
+            await new Promise(r => setTimeout(r, 1500)); // esperar 1.5s
+        }
+    }
+    throw new Error("❌ ERROR FATAL: fetch falló tras varios intentos");
+}
+
+// ============================================
+// 🔥 OBTENER NOMBRE COMÚN EN ESPAÑOL
+// ============================================
+async function obtenerNombreComun(key) {
+    const url = `https://api.gbif.org/v1/species/${key}/vernacularNames`;
+
+    try {
+        const data = await safeFetch(url);
+
+        for (const n of data.results) {
+            const lang = (n.language || "").toLowerCase();
+            if (
+                lang === "es" ||
+                lang === "spa" ||
+                lang.includes("span") ||
+                lang.includes("espa")
+            ) {
+                return n.vernacularName;
+            }
+        }
+    } catch {
+        return null;
+    }
+
+    return null;
+}
+
+// ============================================
+// 🔥 DESCARGAR TODAS LAS ESPECIES DE FUNGIS
+// ============================================
+async function run() {
+    console.log("🚀 Iniciando importación de hongos desde GBIF...");
+
+    await client.connect();
+    const db = client.db(dbName);
+    const col = db.collection(collectionName);
+
+    let offset = 0;
+    const limit = 300; // bajar carga
+    let totalInsertados = 0;
+
+    while (true) {
+        const url = `https://api.gbif.org/v1/species/search?kingdomKey=5&rank=SPECIES&limit=${limit}&offset=${offset}`;
+
+        console.log(`📥 Descargando página offset=${offset} ...`);
+
+        const data = await safeFetch(url);
+
+        if (!data.results || data.results.length === 0) {
+            console.log("🏁 No hay más resultados. Fin.");
+            break;
+        }
+
+        const lote = [];
+
+        for (const sp of data.results) {
+            const scientificName = sp.scientificName;
+            const key = sp.key;
+
+            // nombre común
+            const nombreComun = await obtenerNombreComun(key);
+
+            lote.push({
+                key: key,
+                nombreCientifico: scientificName,
+                nombreComun: nombreComun || null
+            });
+        }
+
+        if (lote.length > 0) {
+            await col.insertMany(lote);
+            totalInsertados += lote.length;
+            console.log(`✅ Insertados ${lote.length} (Total: ${totalInsertados})`);
+        }
+
+        offset += limit;
+        await new Promise(r => setTimeout(r, 1000)); // pausa anti-baneo
+
+        if (offset > 200000) break; // seguridad
+    }
+
+    console.log(`🎉 FINALIZADO. Total insertados: ${totalInsertados}`);
+    await client.close();
+}
+
+run().catch(err => console.error("❌ Error:", err));
