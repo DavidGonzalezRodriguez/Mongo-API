@@ -82,16 +82,38 @@ app.post("/login", async (req, res) => {
 app.get("/cuaderno", async (req, res) => {
     try {
         const cuaderno = db.collection(collectionCuaderno);
-        const elementos = await cuaderno.find().toArray();
+
+        const userId = req.query.userId;
+        console.log("🔍 userId recibido:", userId);
+
+        let filtro = {};
+
+        if (userId) {
+            console.log("➡️ Aplicando filtro por userId");
+
+            if (!ObjectId.isValid(userId)) {
+                console.log("❌ userId inválido");
+                return res.json({ success: false, message: "userId no válido" });
+            }
+
+            filtro = { userId: new ObjectId(userId) };
+        } else {
+            console.log("❌ Android NO envió userId → no se filtra");
+        }
+
+        const elementos = await cuaderno.find(filtro).toArray();
 
         console.log("📌 ELEMENTOS ENVIADOS:", elementos);
 
         res.json(elementos);
+
     } catch (err) {
         console.error(err);
         res.json({ success: false, message: "Error cargando elementos" });
     }
 });
+
+
 
 // POST nuevo elemento
 app.post("/cuaderno", async (req, res) => {
