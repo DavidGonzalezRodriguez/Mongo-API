@@ -37,11 +37,72 @@ conectarBD().then(() => {
 
 const collectionCuaderno = "cuaderno";
 const collectionUsuarios = "usuarios";
+const collectionFungi = "hongos";
+
 
 // Validar ObjectId
 function isValidObjectId(id) {
     return ObjectId.isValid(id) && String(new ObjectId(id)) === id;
 }
+
+// ---------------- FUNGIS: GUARDAR EN MONGO ----------------
+app.post("/fungi", async (req, res) => {
+    try {
+        const { key, nombreCientifico, nombreComun } = req.body;
+
+        if (!key || !nombreCientifico) {
+            return res.json({ success: false, message: "Faltan campos obligatorios" });
+        }
+
+        const fungi = db.collection(collectionFungi);
+
+        // Evitar duplicados por key
+        const existe = await fungi.findOne({ key });
+
+        if (existe) {
+            return res.json({ success: false, message: "Ya existe este hongo" });
+        }
+
+        const nuevo = { key, nombreCientifico, nombreComun };
+
+        await fungi.insertOne(nuevo);
+
+        res.json({ success: true, message: "Hongo guardado correctamente" });
+
+    } catch (err) {
+        console.error(err);
+        res.json({ success: false, message: "Error guardando hongo" });
+    }
+});
+// ---------------- FUNGIS: BÚSQUEDA PARCIAL ----------------
+app.get("/fungi/search", async (req, res) => {
+    try {
+        const texto = (req.query.texto || "").trim();
+
+        if (!texto) return res.json([]);
+
+        const fungi = db.collection(collectionFungi);
+
+        const filtro = {
+            $or: [
+                { nombreCientifico: { $regex: texto, $options: "i" } },
+                { nombreComun: { $regex: texto, $options: "i" } }
+            ]
+        };
+
+        const resultados = await fungi
+            .find(filtro)
+            .limit(100)
+            .toArray();
+
+        res.json(resultados);
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, message: "Error buscando hongos" });
+    }
+});
+
 
 // ---------------- LOGIN ----------------
 app.post("/login", async (req, res) => {
