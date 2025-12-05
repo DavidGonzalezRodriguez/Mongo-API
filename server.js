@@ -75,6 +75,44 @@ app.post("/login", async (req, res) => {
     }
 });
 
+// ---------------- REGISTRO ----------------
+app.post("/register", async (req, res) => {
+    try {
+        const { nombre, email, password } = req.body;
+
+        if (!nombre || !email || !password) {
+            return res.json({ success: false, message: "Faltan campos" });
+        }
+
+        const usuarios = db.collection(collectionUsuarios);
+
+        // Evitar correos duplicados
+        const existe = await usuarios.findOne({ email });
+        if (existe) {
+            return res.json({ success: false, message: "El email ya está registrado" });
+        }
+
+        const nuevo = {
+            nombre,
+            email,
+            password
+        };
+
+        const result = await usuarios.insertOne(nuevo);
+
+        res.json({
+            success: true,
+            message: "Registro exitoso",
+            userId: result.insertedId
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.json({ success: false, message: "Error en registro" });
+    }
+});
+
+
 
 // ---------------- CUADERNO ----------------
 
