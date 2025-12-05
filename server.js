@@ -85,23 +85,28 @@ app.get("/fungi/search", async (req, res) => {
 
         const filtro = {
             $or: [
-                { nombreCientifico: { $regex: texto, $options: "i" } },
-                { nombreComun: { $regex: texto, $options: "i" } }
+                { scientificName: { $regex: texto, $options: "i" } },
+                { vernacularName: { $regex: texto, $options: "i" } }
             ]
         };
 
-        const resultados = await fungi
-            .find(filtro)
-            .limit(100)
-            .toArray();
+        const resultados = await fungi.find(filtro).limit(100).toArray();
 
-        res.json(resultados);
+        // 🔥 Adaptación para Android
+        const salida = resultados.map(h => ({
+            nombreCientifico: h.scientificName,
+            nombreComun: h.vernacularName,
+            key: h.key
+        }));
+
+        res.json(salida);
 
     } catch (err) {
         console.error(err);
-        res.status(500).json({ success: false, message: "Error buscando hongos" });
+        res.status(500).json([]);
     }
 });
+
 
 
 // ---------------- LOGIN ----------------

@@ -1,130 +1,232 @@
-const fetch = require("node-fetch");
+const fs = require("fs");
+const readline = require("readline");
 const { MongoClient } = require("mongodb");
 
-// 🔥 TU URI DE ATLAS
+// CONFIG
 const MONGO_URI = "mongodb+srv://David:Alejandria123@cluster0.mumjhqv.mongodb.net/?retryWrites=true&w=majority";
 const DB_NAME = "Proyecto";
 const COLLECTION = "hongos";
 
-const PAGE_SIZE = 500;
+const TAXON_FILE = "./backbone/taxon.tsv";
+const VERNACULAR_FILE = "./backbone/vernacularname.tsv";
 
-// 🔥 URL CORRECTA (SIN SALTOS, SIN ESPACIOS, SIN LIMIT=0)
-const BASE = "https://api.gbif.org/v1/species/search?kingdomKey=5&rank=SPECIES";
+// Limitador de concurrencia
+function createLimiter(max) {
+    let active = 0;
+    const queue = [];
 
-// ---------------------------------------------
-// FETCH con reintentos
-// ---------------------------------------------
-async function safeFetch(url) {
-    for (let i = 1; i <= 5; i++) {
-        try {
-            const res = await fetch(url);
-            if (!res.ok) throw new Error("HTTP " + res.status);
-            return await res.json();
-        } catch (e) {
-            console.log(`⚠️ Error fetch (${i}/5):`, e.message);
-            await new Promise(r => setTimeout(r, 500 * i));
+    const run = async (fn) => {
+        if (active >= max) await new Promise(r => queue.push(r));
+        active++;
+        try { return await fn(); }
+        finally {
+            active--;
+            if (queue.length) queue.shift()();
         }
-    }
-    throw new Error("❌ fetch falló tras 5 intentos");
+    };
+    return run;
 }
 
-// ---------------------------------------------
-// NOMBRE COMÚN EN ESPAÑOL
-// ---------------------------------------------
-async function getVernacularName(key) {
-    const url = `https://api.gbif.org/v1/species/${key}/vernacularNames`;
+// LISTA COMPLETA DE VARIANTES DE ESPAÑOL
+const spanishVariants = new Set([
+    "es", "spa", "spanish",
+    "es-es", "es-mx", "es-ar", "es-cl", "es-co",
+    "es-pe", "es-ec", "es-uy",
+    "español", "castellano"
+]);
 
-    try {
-        const data = await safeFetch(url);
-        if (!data.results) return null;
+// 1️⃣ — Filtrar taxonID válidos de hongos
+async function obtenerTaxonIdsHongo() {
+    const set = new Set();
 
-        for (const v of data.results) {
-            const lang = (v.language || "").toLowerCase();
-            if (lang.startsWith("es") || lang.includes("span")) {
-                return v.vernacularName || null;
-            }
-        }
-    } catch (_) { }
+    const rl = readline.createInterface({
+        input: fs.createReadStream(TAXON_FILE),
+        crlfDelay: Infinity
+    });
 
-    return null;
-}
+    let header = [];
 
-// ---------------------------------------------
-// PROCESO PRINCIPAL
-// ---------------------------------------------
-async function run() {
+    const allowed = new Set([
+        "species",
+        "subspecies",
+        "variety",
+        "form",
+        "forma",
+        "infraspecificname",
+        "infraspecific epithet"
+    ]);
 
-    console.log("🔵 Conectando a Mongo...");
-    const client = new MongoClient(MONGO_URI);
-    await client.connect();
+    for await (const line of rl) {
+        if (!line.trim()) continue;
+        const cols = line.split("\t");
 
-    const db = client.db(DB_NAME);
-    const col = db.collection(COLLECTION);
-
-    console.log("🧽 Limpiando colección...");
-    await col.deleteMany({});
-
-    // Obtener TOTAL correcto
-    console.log("📥 Obteniendo count total...");
-    const meta = await safeFetch(`${BASE}&limit=0`);
-    const total = meta.count || 0;
-
-    console.log(`📌 Total especies fungi (GBIF): ${total}`);
-
-    let offset = 0;
-    let totalInsertados = 0;
-
-    while (offset < total) {
-
-        console.log(`📥 Descargando bloque offset=${offset}...`);
-
-        let data;
-        try {
-            data = await safeFetch(`${BASE}&limit=${PAGE_SIZE}&offset=${offset}`);
-        } catch (e) {
-            console.log("⏭️ Saltando por error...");
-            offset += PAGE_SIZE;
+        if (header.length === 0) {
+            header = cols;
             continue;
         }
 
-        const batch = [];
-
-        for (const sp of data.results) {
-
-            // Garantizar que realmente sean fungi species
-            if (sp.kingdomKey !== 5) continue;
-            if (sp.rank !== "SPECIES") continue;
-
-            const common = await getVernacularName(sp.key);
-
-            batch.push({
-                key: sp.key,
-                scientificName: sp.scientificName || null,
-                canonicalName: sp.canonicalName || null,
-                vernacularName: common || null,
-
-                phylum: sp.phylum || null,
-                class: sp.class || null,
-                order: sp.order || null,
-                family: sp.family || null,
-                genus: sp.genus || null,
-
-                updated: new Date()
-            });
+        const obj = {};
+        for (let i = 0; i < header.length; i++) {
+            obj[header[i]] = cols[i] || "";
         }
 
-        if (batch.length > 0) {
-            await col.insertMany(batch);
-            console.log(`   ✔ Guardadas ${batch.length}`);
-        }
+        if (obj.kingdom !== "Fungi") continue;
 
-        totalInsertados += batch.length;
-        offset += PAGE_SIZE;
+        // rank válido
+        if (!allowed.has((obj.taxonRank || "").toLowerCase())) continue;
+
+        // género + especie deben existir
+        if (!obj.genericName || !obj.specificEpithet) continue;
+
+        // eliminar clusters basura
+        const sc = obj.scientificName || "";
+        if (sc.startsWith("SH") || sc.startsWith("OTU")) continue;
+
+        // eliminar uncultured/environmental
+        const lower = sc.toLowerCase();
+        if (lower.includes("environmental") || lower.includes("uncultured")) continue;
+
+        // GUARDAR ID
+        set.add(obj.taxonID);
     }
 
-    console.log("🎉 COMPLETADO — Total final insertado:", totalInsertados);
+    return set;
+}
+
+// 2️⃣ — Cargar nombres comunes ES
+async function cargarNombresComunesFiltrados(hongoIDs) {
+    const map = new Map();
+
+    const rl = readline.createInterface({
+        input: fs.createReadStream(VERNACULAR_FILE),
+        crlfDelay: Infinity
+    });
+
+    let header = [];
+
+    for await (const line of rl) {
+        if (!line.trim()) continue;
+        const cols = line.split("\t");
+
+        if (header.length === 0) {
+            header = cols;
+            continue;
+        }
+
+        const obj = {};
+        for (let i = 0; i < header.length; i++) {
+            obj[header[i]] = cols[i] || "";
+        }
+
+        const lang = (obj.language || "").toLowerCase();
+
+        // aceptar todas las variantes de ES
+        if (spanishVariants.has(lang) && hongoIDs.has(obj.taxonID)) {
+            if (!map.has(obj.taxonID)) {
+                map.set(obj.taxonID, obj.vernacularName);
+            }
+        }
+    }
+
+    return map;
+}
+
+// 3️⃣ — Importar especies válidas
+async function importarTaxones(mapVernacular, col) {
+    const rl = readline.createInterface({
+        input: fs.createReadStream(TAXON_FILE),
+        crlfDelay: Infinity
+    });
+
+    const insertLimiter = createLimiter(6);
+    let header = [];
+    let batch = [];
+    let total = 0;
+
+    const allowed = new Set([
+        "species",
+        "subspecies",
+        "variety",
+        "form",
+        "forma",
+        "infraspecificname",
+        "infraspecific epithet"
+    ]);
+
+    for await (const line of rl) {
+        if (!line.trim()) continue;
+        const cols = line.split("\t");
+
+        if (header.length === 0) {
+            header = cols;
+            continue;
+        }
+
+        const obj = {};
+        for (let i = 0; i < header.length; i++) {
+            obj[header[i]] = cols[i] || "";
+        }
+
+        if (obj.kingdom !== "Fungi") continue;
+        if (!allowed.has((obj.taxonRank || "").toLowerCase())) continue;
+        if (!obj.genericName || !obj.specificEpithet) continue;
+
+        const sc = obj.scientificName || "";
+        if (sc.startsWith("SH") || sc.startsWith("OTU")) continue;
+
+        batch.push({
+            _id: obj.taxonID,
+            scientificName: obj.scientificName,
+            vernacularName: mapVernacular.get(obj.taxonID) || null
+        });
+
+        if (batch.length >= 2000) {
+            const chunk = batch;
+            batch = [];
+
+            insertLimiter(async () => {
+                try {
+                    await col.insertMany(chunk, { ordered: false });
+                } catch (e) {
+                    if (e.code !== 11000) throw e;
+                }
+            });
+
+            total += chunk.length;
+        }
+    }
+
+    if (batch.length) {
+        await col.insertMany(batch, { ordered: false });
+        total += batch.length;
+    }
+
+    return total;
+}
+
+// MAIN
+async function run() {
+    console.log("🔵 Conectando a Mongo...");
+    const client = new MongoClient(MONGO_URI);
+    await client.connect();
+    const col = client.db(DB_NAME).collection(COLLECTION);
+
+    await col.deleteMany({});
+
+    console.log("📌 1) Filtrando especies reales de hongos...");
+    const hongoIDs = await obtenerTaxonIdsHongo();
+    console.log("✔ Especies válidas:", hongoIDs.size);
+
+    console.log("📌 2) Cargando nombres comunes en español...");
+    const mapVernacular = await cargarNombresComunesFiltrados(hongoIDs);
+    console.log("✔ Nombres comunes ES cargados:", mapVernacular.size);
+
+    console.log("📌 3) Importando al MongoDB...");
+    const total = await importarTaxones(mapVernacular, col);
+
+    console.log("🎉 FIN — Especies importadas:", total);
 
     await client.close();
 }
 
-run().catch(err => console.error("❌ Error:", err));
+run().catch(console.error);
