@@ -90,13 +90,13 @@ app.get("/fungi/search", async (req, res) => {
             ]
         };
 
-        const resultados = await fungi.find(filtro).limit(100).toArray();
+        const encontrados = await fungi.find(filtro).limit(100).toArray();
 
         // 🔥 Adaptación para Android
-        const salida = resultados.map(h => ({
+        const salida = encontrados.map(h => ({
             nombreCientifico: h.scientificName,
             nombreComun: h.vernacularName,
-            key: h.key
+            key: h.key || null
         }));
 
         res.json(salida);
