@@ -57,12 +57,24 @@ app.post("/login", async (req, res) => {
         if (usuario.password !== password)
             return res.json({ success: false, message: "Contraseña incorrecta" });
 
-        res.json({ success: true, message: "Login exitoso" });
+        // -------------- NUEVO: devolvemos datos reales ---------------
+        res.json({
+            success: true,
+            message: "Login exitoso",
+            user: {
+                id: usuario._id,
+                nombre: usuario.nombre,
+                email: usuario.email
+            }
+        });
+        // --------------------------------------------------------------
+
     } catch (err) {
         console.error(err);
         res.json({ success: false, message: "Error en login" });
     }
 });
+
 
 // ---------------- CUADERNO ----------------
 
